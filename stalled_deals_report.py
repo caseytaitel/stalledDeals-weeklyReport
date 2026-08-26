@@ -423,7 +423,7 @@ def _rep_deal_rows(deals):
 def _rep_deal_table(deals):
     return (
         "<div class=\"table-wrap\">"
-        "<table>"
+        "<table class=\"deals\">"
         "<thead><tr>"
         "<th>Deal Name</th>"
         "<th>Deal Stage</th>"
@@ -617,6 +617,28 @@ CSS = """
   table.overview th:first-child {
     white-space: nowrap;
   }
+  table.deals {
+    table-layout: fixed;
+    width: 100%;
+  }
+  table.deals th:nth-child(1),
+  table.deals td:nth-child(1) {
+    width: auto;
+  }
+  table.deals th:nth-child(2),
+  table.deals td:nth-child(2) {
+    width: 11.5rem;
+    white-space: nowrap;
+  }
+  table.deals th:nth-child(3),
+  table.deals td:nth-child(3) {
+    width: 9.5rem;
+  }
+  table.deals th:nth-child(4),
+  table.deals td:nth-child(4) {
+    width: 8rem;
+    white-space: nowrap;
+  }
   th, td {
     padding: 8px 12px;
     text-align: left;
@@ -663,6 +685,7 @@ CSS = """
     text-decoration: none;
     font-weight: 600;
   }
+  .deal-link { overflow-wrap: anywhere; }
   .deal-link:hover, .rep-link:hover { text-decoration: underline; }
   tr.row-mild { background: var(--mild-bg); }
   tr.row-watch { background: var(--watch-bg); }
