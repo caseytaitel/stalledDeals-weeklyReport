@@ -5,6 +5,7 @@ CRO stalled-deals report.
 Pulls all Realm Prospects deals in Discovery / Qualification / Planning / Evaluation
 that have been in the current stage ≥ 30 days, every rep, no partner filter.
 Writes a self-contained HTML file with an Overview tab and one tab per rep.
+Rep tabs split deals by fiscal close period (past, remaining quarters, next FY).
 
 USAGE
   1. pip install -r requirements.txt
@@ -61,6 +62,10 @@ BANDS = (
     {"lo": 90, "hi": 179, "key": "band_90_179", "row": "row-warn", "badge": "badge-warn", "header": "90–179d"},
     {"lo": 180, "hi": None, "key": "band_180", "row": "row-critical", "badge": "badge-critical", "header": "180d+"},
 )
+
+# Fiscal year starts February 1. FY number is the calendar year it ends in:
+# Feb 2026–Jan 2027 is FY27; Q1 Feb–Apr, Q2 May–Jul, Q3 Aug–Oct, Q4 Nov–Jan.
+FY_START_MONTH = 2
 
 DEAL_RECORD_URL = f"https://app.hubspot.com/contacts/{PORTAL_ID}/record/0-3/{{deal_id}}"
 
@@ -216,6 +221,65 @@ def days_since(date_str):
         return None
 
 
+def _parse_close_date(date_str):
+    """Return a date from 'YYYY-MM-DD', or None if missing/invalid."""
+    if not date_str:
+        return None
+    try:
+        return datetime.strptime(date_str[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
+
+
+def _fiscal_year(d):
+    """Calendar year the FY ending on this date ends in. Feb 1, 2026 → 2027."""
+    if d.month >= FY_START_MONTH:
+        return d.year + 1
+    return d.year
+
+
+def _fiscal_quarter(d):
+    """1–4 for a Feb-start fiscal year. Aug → 3, Jan → 4."""
+    offset = (d.month - FY_START_MONTH) % 12
+    return offset // 3 + 1
+
+
+def _fy_label(year):
+    return f"FY{year % 100:02d}"
+
+
+def _close_period_sections(deals, as_of):
+    """Split deals into past / remaining FY quarters / next FY / no date.
+
+    Empty sections are omitted. Order inside each section is preserved
+    (callers pass deals already sorted by days in stage).
+    """
+    if isinstance(as_of, datetime):
+        as_of = as_of.date()
+    as_of_fy = _fiscal_year(as_of)
+    as_of_q = _fiscal_quarter(as_of)
+    later_label = _fy_label(as_of_fy + 1)
+    buckets = [("Past close date", [])]
+    for q in range(as_of_q, 5):
+        buckets.append((f"Q{q}", []))
+    buckets.append((later_label, []))
+    buckets.append(("No close date", []))
+    by_label = {label: rows for label, rows in buckets}
+
+    for deal in deals:
+        close = _parse_close_date(deal.get("close_date"))
+        if close is None:
+            by_label["No close date"].append(deal)
+        elif close < as_of:
+            by_label["Past close date"].append(deal)
+        elif _fiscal_year(close) == as_of_fy and _fiscal_quarter(close) >= as_of_q:
+            by_label[f"Q{_fiscal_quarter(close)}"].append(deal)
+        else:
+            by_label[later_label].append(deal)
+
+    return [(label, rows) for label, rows in buckets if rows]
+
+
 def _band_for_days(days):
     """Return the BANDS entry for a stalled deal's age."""
     for band in BANDS:
@@ -356,6 +420,22 @@ def _rep_deal_rows(deals):
     return "\n".join(parts)
 
 
+def _rep_deal_table(deals):
+    return (
+        "<div class=\"table-wrap\">"
+        "<table>"
+        "<thead><tr>"
+        "<th>Deal Name</th>"
+        "<th>Deal Stage</th>"
+        "<th class=\"num\">Days in Stage</th>"
+        "<th>Close Date</th>"
+        "</tr></thead>"
+        f"<tbody>{_rep_deal_rows(deals)}</tbody>"
+        "</table>"
+        "</div>"
+    )
+
+
 def _overview_rows(reps):
     if not reps:
         return _empty_row(2 + len(BANDS), "None currently.")
@@ -395,45 +475,37 @@ def _overview_totals_row(reps):
 
 
 def _tab_buttons(reps):
+    grand = sum(r["count"] for r in reps)
     parts = [
         '<button type="button" class="tab-btn active" role="tab" '
-        'data-tab="overview" aria-selected="true">Overview</button>'
+        f'data-tab="overview" data-count="{grand}" aria-selected="true">Overview</button>'
     ]
     for rep in reps:
         parts.append(
             '<button type="button" class="tab-btn" role="tab" '
-            'data-tab="{tab}" aria-selected="false">{name}</button>'.format(
+            'data-tab="{tab}" data-count="{count}" aria-selected="false">{name}</button>'.format(
                 tab=_esc(rep["tab_id"]),
+                count=rep["count"],
                 name=_esc(rep["name"]),
             )
         )
     return "\n".join(parts)
 
 
-def _rep_panels(reps):
+def _rep_panels(reps, as_of):
     parts = []
     for rep in reps:
-        heading = f'{_esc(rep["name"])} — {rep["count"]} stalled'
+        sections = []
+        for title, deals in _close_period_sections(rep["deals"], as_of):
+            sections.append(
+                f'<div class="section"><h2>{_esc(title)}</h2>{_rep_deal_table(deals)}</div>'
+            )
         parts.append(
             '<section class="tab-panel" id="{tab}" role="tabpanel" hidden>'
-            "<div class=\"section\">"
-            "<h2>{heading}</h2>"
-            "<div class=\"table-wrap\">"
-            "<table>"
-            "<thead><tr>"
-            "<th>Deal Name</th>"
-            "<th>Deal Stage</th>"
-            "<th class=\"num\">Days in Stage</th>"
-            "<th>Close Date</th>"
-            "</tr></thead>"
-            "<tbody>{rows}</tbody>"
-            "</table>"
-            "</div>"
-            "</div>"
+            "{sections}"
             "</section>".format(
                 tab=_esc(rep["tab_id"]),
-                heading=heading,
-                rows=_rep_deal_rows(rep["deals"]),
+                sections="".join(sections),
             )
         )
     return "\n".join(parts)
@@ -448,13 +520,13 @@ CSS = """
     --line: #e4e8ed;
     --accent: #1f6feb;
     --mild: #a16207;
-    --mild-bg: #fef9c3;
+    --mild-bg: #fff7d9;
     --watch: #c2410c;
-    --watch-bg: #fff7ed;
+    --watch-bg: #fff2e1;
     --warn: #9a3412;
-    --warn-bg: #fff1e6;
+    --warn-bg: #ffebd9;
     --crit: #9f1239;
-    --crit-bg: #fff1f2;
+    --crit-bg: #ffebec;
   }
   * { box-sizing: border-box; }
   body {
@@ -580,10 +652,10 @@ CSS = """
   }
   tr:last-child td { border-bottom: none; }
   tbody tr:hover td { background: #fafbfd; }
-  tbody tr.row-mild:hover td { background: #fef08a; }
-  tbody tr.row-watch:hover td { background: #ffedd5; }
-  tbody tr.row-warn:hover td { background: #ffe4cc; }
-  tbody tr.row-critical:hover td { background: #ffe4e6; }
+  tbody tr.row-mild:hover td { background: #feeda9; }
+  tbody tr.row-watch:hover td { background: #ffe2c0; }
+  tbody tr.row-warn:hover td { background: #fecfa0; }
+  tbody tr.row-critical:hover td { background: #ffd9dd; }
   .num { white-space: nowrap; }
   .nowrap { white-space: nowrap; }
   .deal-link, .rep-link {
@@ -611,10 +683,10 @@ CSS = """
     font-size: 12px;
     text-align: center;
   }
-  .badge-mild { background: #fde047; color: var(--mild); }
-  .badge-watch { background: #ffedd5; color: var(--watch); }
-  .badge-warn { background: #fed7aa; color: var(--warn); }
-  .badge-critical { background: #ffe4e6; color: var(--crit); }
+  .badge-mild { background: #feeda9; color: var(--mild); }
+  .badge-watch { background: #ffe2c0; color: var(--watch); }
+  .badge-warn { background: #fecfa0; color: var(--warn); }
+  .badge-critical { background: #ffd9dd; color: var(--crit); }
   th .badge {
     min-width: 0;
     padding: 2px 9px;
@@ -627,6 +699,7 @@ JS = """
 (function () {
   var buttons = document.querySelectorAll(".tab-btn");
   var panels = document.querySelectorAll(".tab-panel");
+  var countEl = document.getElementById("masthead-count");
 
   function activate(id) {
     if (!id) return;
@@ -641,6 +714,10 @@ JS = """
       var on = btn.getAttribute("data-tab") === id;
       btn.classList.toggle("active", on);
       btn.setAttribute("aria-selected", on ? "true" : "false");
+      if (on && countEl) {
+        var count = btn.getAttribute("data-count");
+        if (count) countEl.textContent = count;
+      }
     });
     try {
       if (history.replaceState) {
@@ -698,7 +775,7 @@ def build_html_report(reps, now):
 <body>
   <div class="page">
     <header class="masthead">
-      <h1>Stalled Deals: <span class="count">{total}</span></h1>
+      <h1>Stalled Deals: <span class="count" id="masthead-count">{total}</span></h1>
       <p class="date">{today}</p>
     </header>
 
@@ -737,7 +814,7 @@ def build_html_report(reps, now):
       </div>
     </section>
 
-    {_rep_panels(reps)}
+    {_rep_panels(reps, now.date() if isinstance(now, datetime) else now)}
   </div>
   <script>{JS}</script>
 </body>
