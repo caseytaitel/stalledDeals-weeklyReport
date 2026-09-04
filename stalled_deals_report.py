@@ -2,8 +2,9 @@
 """
 CRO stalled-deals report.
 
-Pulls all Realm Prospects deals in Discovery / Qualification / Planning / Evaluation
-that have been in the current stage ≥ 30 days, every rep, no partner filter.
+Pulls all Realm Prospects deals in Discovery / Qualification / Planning / Evaluation /
+Negotiation / Procurement that have been in the current stage ≥ 30 days, every rep,
+no partner filter.
 Writes a self-contained HTML file with an Overview tab and one tab per rep.
 Rep tabs split deals by fiscal close period (past, remaining quarters, next FY).
 
@@ -11,7 +12,7 @@ USAGE
   1. pip install -r requirements.txt
   2. Set HUBSPOT_TOKEN in .env.local
   3. Run: python cro_stalled_report.py
-  4. Open output/cro_stalled_report_YYYY-MM-DD.html and share it yourself.
+  4. Open output/stalled_report_YYYY-MM-DD.html and share it yourself.
 """
 
 import html
@@ -42,15 +43,15 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-# Realm Prospects stages through 50% Evaluation. Closed Won / Closed Lost /
-# Closed No Opportunity are omitted by not being in this list. Do not filter
-# on HubSpot isClosed — pipeline metadata can mark funnel stages closed
-# (Deal Reg is one example) and those deals would vanish.
+# Realm Prospects stages. Closed Won / Closed Lost / Closed No Opportunity
+# / Deal Reg are omitted by not being in this list. 
 STAGE_LABELS = {
     "appointmentscheduled": "10% Discovery",
     "qualifiedtobuy": "20% Qualification",
     "presentationscheduled": "30% Planning",
     "decisionmakerboughtin": "50% Evaluation",
+    "1412214374": "75% Negotiation",
+    "1412220225": "90% Procurement"
 }
 STALLED_STAGE_IDS = list(STAGE_LABELS)
 STALLED_THRESHOLD_DAYS = 30
@@ -127,7 +128,7 @@ def hubspot_search_deals(filter_groups, properties, limit=200):
 
 
 def fetch_early_stage_deals():
-    """All Realm Prospects deals in Discovery through Evaluation. Not yet age-filtered."""
+    """All Realm Prospects deals in listed STAGE_LABELS stages. Not yet age-filtered."""
     return hubspot_search_deals(
         filter_groups=[{
             "filters": [
@@ -138,6 +139,7 @@ def fetch_early_stage_deals():
             "dealname",
             "dealstage",
             "hs_v2_date_entered_current_stage",
+            "createdate",
             "closedate",
             "hubspot_owner_id",
         ],
@@ -311,6 +313,7 @@ def _stalled_row(deal):
         "name": p.get("dealname") or "(unnamed)",
         "stage_label": STAGE_LABELS[stage_id],
         "days_in_stage": stage_days,
+        "days_open": days_since(p.get("createdate")),
         "close_date": close_raw[:10] if close_raw else "",
         "owner": get_owner_name(p.get("hubspot_owner_id")),
     }
@@ -399,14 +402,16 @@ def _empty_row(colspan, message):
 
 def _rep_deal_rows(deals):
     if not deals:
-        return _empty_row(4, "None currently.")
+        return _empty_row(5, "None currently.")
     parts = []
     for r in deals:
         days = r["days_in_stage"]
+        days_open = r["days_open"]
         parts.append(
             "<tr class=\"{cls}\">"
             "<td>{name}</td>"
             "<td>{stage}</td>"
+            "<td class=\"num\">{open}</td>"
             "<td class=\"num\">{badge}</td>"
             "<td class=\"nowrap\">{close}</td>"
             "</tr>".format(
@@ -414,6 +419,7 @@ def _rep_deal_rows(deals):
                 name=_deal_name_cell(r["id"], r["name"]),
                 stage=_esc(r["stage_label"]),
                 badge=_days_badge(days),
+                open="—" if days_open is None else days_open,
                 close=_esc(_format_date(r["close_date"])),
             )
         )
@@ -427,6 +433,7 @@ def _rep_deal_table(deals):
         "<thead><tr>"
         "<th>Deal Name</th>"
         "<th>Deal Stage</th>"
+        "<th class=\"num\">Days Open</th>"
         "<th class=\"num\">Days in Stage</th>"
         "<th>Close Date</th>"
         "</tr></thead>"
@@ -632,10 +639,14 @@ CSS = """
   }
   table.deals th:nth-child(3),
   table.deals td:nth-child(3) {
-    width: 9.5rem;
+    width: 7.5rem;
   }
   table.deals th:nth-child(4),
   table.deals td:nth-child(4) {
+    width: 9.5rem;
+  }
+  table.deals th:nth-child(5),
+  table.deals td:nth-child(5) {
     width: 8rem;
     white-space: nowrap;
   }
@@ -852,7 +863,7 @@ def main():
     report = build_html_report(reps, now)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    filename = f"cro_stalled_report_{now.strftime('%Y-%m-%d')}.html"
+    filename = f"stalled_report_{now.strftime('%Y-%m-%d')}.html"
     filepath = os.path.join(OUTPUT_DIR, filename)
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(report)
